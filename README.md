@@ -3,6 +3,7 @@
 ## Setup ##
 ```
 git clone https://github.com/roseorenbuch/arcasHLA.git
+git checkout v2
 ```
 ## Extract ##
 arcasHLA extract now extracts pairs with one or both mates aligned to an HLA locus (all HLA genes and pseudogenes). Add `--chr6` if you want to extract all reads aligned to chromosome 6.
