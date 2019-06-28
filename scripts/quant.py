@@ -21,7 +21,17 @@
 #   You should have received a copy of the GNU General Public License
 #   along with arcasHLA.  If not, see <https://www.gnu.org/licenses/>.
 #-------------------------------------------------------------------------------
-import time
+from Bio import SeqIO
+from collections import defaultdict
+from collections import Counter
+import pandas as pd
+import json
+import pickle
+import gzip
+import numpy as np
+from Bio import pairwise2
+
+from argparse import RawTextHelpFormatter
 
 import os
 import sys
@@ -30,16 +40,7 @@ import json
 import pickle
 import argparse
 import logging as log
-
-import numpy as np
-import math
-import pandas as pd
-
-from datetime import date
-from argparse import RawTextHelpFormatter
-from textwrap import wrap
-from collections import Counter, defaultdict
-from itertools import combinations
+from scipy import stats
 
 from reference import check_ref
 from arcas_utilities import *
@@ -50,31 +51,256 @@ __version__     = '0.2'
 __date__        = '2019-04-02'
 
 #-------------------------------------------------------------------------------
-rootDir = os.path.dirname(os.path.realpath(__file__)) + '/../'
-parameters = rootDir + 'dat/info/parameters.p'
+#   Paths and filenames
 #-------------------------------------------------------------------------------
-def arg_check_files(parser, arg):
-    for file in arg.split():
-        if not os.path.isfile(file):
-            parser.error('The file %s does not exist.' %file)
-        elif not (file.endswith('alignment.p') or file.endswith('.fq.gz') or file.endswith('.fastq.gz') or file.endswith('.tsv') or file.endswith('.json')):
-            parser.error('The format of %s is invalid.' %file)
-        return arg
+
+rootDir    = os.path.dirname(os.path.realpath(__file__)) + '/../'
+parameters = rootDir + 'dat/info/parameters.p'
+hla_fasta  = rootDir + 'dat/info/hla.fasta'
+mapping_p  = rootDir + 'dat/info/mapping.p'
+
+#-------------------------------------------------------------------------------
+#   Quantification
+#-------------------------------------------------------------------------------
+
+def get_eq_class(read):
+    def get_eq(read):
+        i = 1
+        kmer_prev = read[:k]
+
+        while ('N' in kmer_prev or not db[kmer_prev]) and i < len(read) - k:
+            kmer_prev = read[i:i+k]
+            i += 1
+
+        read_eqs = []
+
+        while i < len(read) - k:
+            kmer_curr = read[i:i+k]
+            if 'N' in kmer_curr:
+                i += 1
+                break
+
+            if kmer_curr not in db[kmer_prev]:
+                break
+            elif len(db[kmer_prev]) == 1 and i < len(read) - k - 2:
+                read_eqs.append(eq[kmer_curr])
+                while len(db[kmer_prev]) == 1 and i < len(read) - k - 2:
+                    kmer_prev = list(db[kmer_prev])[0]
+                    i += 1
+            else:
+                read_eqs.append(eq[kmer_curr])
+                kmer_prev = kmer_curr
+                i += 1
+
+        if len(read_eqs) == 0: return set()
+        return set.intersection(*read_eqs)
     
+    return get_eq(read) | get_eq(reverse_complement(read))
+
+def reverse_complement(string):
+    complement = ''.maketrans('AGCT','TCGA')
+    return string[::-1].translate(complement)
+
+def build_de_bruijn(genotype, all_hlas):
+    db = defaultdict(set)
+    eq = defaultdict(set)
+
+    for allele,allele_id in genotype.items(): 
+        if allele not in all_hlas:
+            continue
+        seq = str(all_hlas[allele].seq)
+
+        for i in range(len(seq) - k):
+            kmer_curr = seq[i:i+k]
+            kmer_right = None
+
+            if i < len(seq):
+                kmer_right = seq[i+1:i+k+1]
+
+            db[kmer_curr].add(kmer_right)
+
+
+            eq[kmer_curr].add(allele.split('*')[0])
+            
+    for allele in all_hlas:
+        if allele.split('*')[0] in genotype_genes: continue
+
+        seq = str(all_hlas[allele].seq)
+
+        for i in range(len(seq) - k):
+            kmer_curr = seq[i:i+k]
+            kmer_right = None
+
+            if i < len(seq):
+                kmer_right = seq[i+1:i+k+1]
+
+            db[kmer_curr].add(kmer_right)
+            eq[kmer_curr].add(allele.split('*')[0])
+    return db, eq
+
+def hash_reads(readIDs, reads1, reads2, db, eq):
+    eq_count = defaultdict(int)
+    eq_reads = defaultdict(set)
+    eq_read_by_gene = defaultdict(set)
+
+    for readID in readIDs:
+        read1 = reads1[readID]
+        read2 = reads2[readID]
+
+        intersection = get_eq_class(read1) & get_eq_class(read2)
+        eq_count[','.join(sorted(intersection))] += 1
+        if intersection:
+            eq_reads[','.join(sorted(intersection))].add(readID)
+            for gene in intersection:
+                eq_read_by_gene[gene].add(readID)
+                
+    return eq_count, eq_reads, eq_read_by_gene
+
+def find_mismatches(a1, a2):
+    def get_kmers(idx, seq):
+        kmers = set()
+        start = max(idx - k, 0)
+        stop = min(idx + k, len(seq) - k)
+        for i in range(start,stop):
+            kmers.add(seq[i:i+k])
+        return kmers - shared_kmers
+    
+    a1 = str(all_hlas[a1].seq)
+    a2 = str(all_hlas[a2].seq)
+
+    alignments = pairwise2.align.localms(a1, a2, 2, 0, -10, -1)
+    align1, align2, _, _, _ = alignments[0]
+
+    a1_kmers = set()
+    for i in range(len(a1)):
+        a1_kmers.add(a1[i:i+k])
+    a2_kmers = set()
+    for i in range(len(a2)):
+        a2_kmers.add(a2[i:i+k])
+
+    shared_kmers = a1_kmers & a2_kmers
+
+    kmers_mismatch = defaultdict(set)
+    kmers_allele = defaultdict(set)
+    mismatch_locations = defaultdict(list)
+
+    n = 0
+    gap = 0
+
+    idx1 = 0
+    idx2 = 0
+
+    for idx in range(len(align1)):
+        if align1[idx] == align2[idx]:
+            if gap and idx1_kmers and idx2_kmers:
+                mismatch_locations[n].append(idx1)
+                mismatch_locations[n].append(idx2)
+                
+                
+                for kmer in kmers1:
+                    kmers_mismatch[kmer].add(n)
+                    kmers_allele[kmer] |= {1}
+                for kmer in kmers2:
+                    kmers_mismatch[kmer].add(n)
+                    kmers_allele[kmer] |= {2}
+
+                n+=1
+
+            gap = 0
+            idx1 += 1
+            idx2 += 1
+            continue
+
+        if gap == 0:
+            kmers1 = set()
+            kmers2 = set()
+
+        idx1_kmers = get_kmers(idx1, a1)
+        idx2_kmers = get_kmers(idx2, a2)
+
+        if idx1_kmers and idx2_kmers:
+            kmers1 |= idx1_kmers
+            kmers2 |= idx2_kmers
+
+        if align1[idx] == '-':
+            idx2 += 1
+        elif align2[idx] == '-':
+            idx1 += 1
+        else:
+            idx1 += 1
+            idx2 += 1
+
+        gap += 1
+    
+    return kmers_mismatch, kmers_allele, n, mismatch_locations
+
+def get_mismatch_coverage(gene, count_both_reads):
+    def get_mismatch(read):
+        mismatches = set()
+        alleles = set()
+
+        for i in range(len(read) - k):
+            kmer = read[i:i+k]
+            kmer_rc = reverse_complement(kmer)
+
+            mismatches |=  kmers_mismatch[kmer] | kmers_mismatch[kmer_rc]
+            alleles |= kmers_allele[kmer] | kmers_allele[kmer_rc]
+        return mismatches, alleles
+    
+    mismatch_coverage = {i:defaultdict(int) for i in range(n)}
+    mismatch_genes = {i:[[],[]] for i in range(n)}
+    
+
+    for readID in eq_read_by_gene[gene]:
+        mismatches1, alleles1 = get_mismatch(reads1[readID])
+        mismatches2, alleles2 = get_mismatch(reads2[readID])
+        mismatches = mismatches1 | mismatches2
+        alleles = alleles1 & alleles2
+        
+        genes1 = get_eq_class(reads1[readID])
+        genes2 = get_eq_class(reads2[readID])
+
+        genes =  genes1 & genes2
+
+        contribution = eq_count[gene]/sum([eq_count[gene_] for gene_ in genes])
+
+        if len(alleles) != 1: continue
+            
+
+        allele = alleles.pop()
+        
+        #for mismatch in mismatches1:
+        #    mismatch_genes[mismatch]['allele' + str(allele)].extend(list(genes1))
+        #for mismatch in mismatches2:
+        #    mismatch_genes[mismatch]['allele' + str(allele)].extend(list(genes2))
+        
+        for mismatch in mismatches:
+            mismatch_genes[mismatch][allele - 1].extend(list(genes))
+        
+        for mismatch in mismatches:
+            if count_both_reads and mismatch in mismatches1 & mismatches2:
+                mismatch_coverage[mismatch][allele] += 2*contribution
+            else:
+                mismatch_coverage[mismatch][allele] += contribution
+            
+    return mismatch_coverage, mismatch_genes
+
+#-------------------------------------------------------------------------------
+
 if __name__ == '__main__':
     
-    with open(parameters, 'rb') as file:
-        genes, populations, databases = pickle.load(file)
+    all_hlas = SeqIO.to_dict(SeqIO.parse(hla_fasta, 'fasta'))
+    with open(mapping_p,'rb') as file:
+        allele_mapping_single,allele_mapping_2field,allele_mapping_ggroup = pickle.load(file)
     
     parser = argparse.ArgumentParser(prog='arcasHLA quant',
                                  usage='%(prog)s [options] FASTQs',
                                  add_help=False,
                                  formatter_class=RawTextHelpFormatter)
     
-    parser.add_argument('file', 
-                        help='list of fastq files', 
-                        nargs='*',
-                        type=lambda x: arg_check_files(parser, x))
+    parser.add_argument('files', 
+                        help='list of extracted fastq files', 
+                        nargs='*')
     
     parser.add_argument('-h',
                         '--help', 
@@ -82,17 +308,48 @@ if __name__ == '__main__':
                         help='show this help message and exit\n\n',
                         default=argparse.SUPPRESS)
     
-    parser.add_argument('--sample',
-                    help = 'sample name',
-                    type = str,
-                    default = None)
-
-    parser.add_argument('--ref', 
-                        type=str,
-                        help='arcasHLA quant_ref path (e.g. "/path/to/ref/sample")\n  ',
-                        default=None, 
-                        metavar='')
+    parser.add_argument('--subject',
+                        help = 'subject name',
+                        type = str,
+                        default = None)
     
+    parser.add_argument('--sample',
+                        help = 'sample name',
+                        type = str)
+    
+    parser.add_argument('--genotypes',
+                        help = 'tsv file containing HLA genotypes',
+                        type = str)
+    
+    parser.add_argument('-k',
+                        help = 'k-mer length (default: 31)',
+                        type = int,
+                        default = 31)
+    
+    parser.add_argument('--mapping',
+                        help = 'single, 2-field, g-group',
+                        type = str,
+                        default = 'g-group')
+
+    
+    parser.add_argument('--count_both_reads',
+                        help = 'if both mates overlap the same mismatch, both reads contribute to read count.',
+                        action = 'count')
+    
+    '''
+    
+    parser.add_argument('--purity',
+                        help = 'purity',
+                        type = float,
+                        default = np.nan)
+    
+    parser.add_argument('--ploidy',
+                        help = 'ploidy',
+                        type = float,
+                        default = np.nan)
+                        
+    '''
+
     parser.add_argument('-o',
                         '--outdir',
                         type=str,
@@ -105,212 +362,86 @@ if __name__ == '__main__':
                         help='temp directory\n\n',
                         default='/tmp/', 
                         metavar='')
-    
-    parser.add_argument('--keep_files',
-                        action = 'count',
-                        help='keep intermediate files\n\n',
-                        default=False)
-                        
-    parser.add_argument('-t',
-                        '--threads', 
-                        type = str,
-                        default='1',
-                        metavar='')
-
-    parser.add_argument('-v',
-                        '--verbose', 
-                        action = 'count',
-                        default=False)
 
     args = parser.parse_args()
+    k = args.k
     
-    paired = False
-    if len(args.file) == 0:
-        sys.exit('[genotype] Error: FASTQ required')
-    elif len(args.file) == 2:
-        paired = True
-        
-    if args.sample == None:
-        sample = os.path.basename(args.file[0]).split('.')[0]
+    # Load genotype
+    genotypes = pd.read_csv(args.genotypes, sep = '\t').set_index('subject')
+    input_genotype = genotypes.loc[args.subject].to_dict()
+    
+    # Select mapping based on argument input
+    if args.mapping.lower() == 'single':
+        allele_mapping = allele_mapping_single
+    elif args.mapping.lower() == '2-field':
+        allele_mapping = allele_mapping_2field
     else:
-        sample = args.sample
+        allele_mapping = allele_mapping_ggroup
 
-    outdir = check_path(args.outdir)
-    temp = create_temp(args.temp)
-        
-    indv_idx = args.ref + '.idx'
-    indv_p = args.ref + '.p'
-    indv_abundance =  outdir + sample + '.quant.tsv'
-    allele_results_json = outdir + sample + '.quant.alleles.json'
-    gene_results_json = outdir + sample + '.quant.genes.json'
-    allele_results_tsv = outdir + sample + '.quant.alleles.tsv'
-    gene_results_tsv = outdir + sample + '.quant.genes.tsv'
+    # Get all alleles based on mapping
+    genotype = dict()
+    for allele_id,allele in input_genotype.items():
+        if type(allele) != str:
+            continue
+        for allele in allele_mapping[allele]:
+            genotype[allele] = allele_id
 
-
-    with open(indv_p, 'rb') as file:
-        genes,genotype,hla_idx,allele_idx,lengths = pickle.load(file)
-
-    idx_allele = defaultdict(set)
-    for idx, gene in allele_idx.items():
-        idx_allele[gene].add(idx)
-        
-    if args.file[0].endswith('.fq.gz'):
+    # Which genes to quantify
+    genotype_genes = {allele.split('*')[0] for allele in genotype}
     
+    # Load reads
+    reads1 = dict()
+    with gzip.open(args.files[0], 'rt') as file:
+        for record in SeqIO.parse(file, 'fastq'):
+            reads1[record.id.split('/')[0]] = str(record.seq)
 
-        reads_file = ''.join([temp, sample, '.reads.txt'])
-        if not paired:
-            num, avg, std = analyze_reads(args.file, paired, reads_file, False)
-            if std == 0.0: std = .00000001
-
-
-        command = ['kallisto quant', '-i', indv_idx, '-o', temp, '-t', args.threads]
-
-        if len(args.file) == 1:
-            command.extend('--single -l', str(avg), '-s', str(std))
-
-        command.extend(args.file)
-
-        output = run_command(command).stderr.decode()
-
-        total_reads = re.findall('(?<=processed ).+(?= reads,)',output)[0]
-        total_reads = int(re.sub(',','',total_reads))
-        aligned_reads = re.findall('(?<=reads, ).+(?= reads pseudoaligned)',output)[0]
-        aligned_reads = int(re.sub(',','',aligned_reads))
-
-
-        run_command(['mv',temp + '/abundance.tsv',indv_abundance])
-        kallisto_results = pd.read_csv(indv_abundance, sep = '\t')
-        
-    else:
-        with open(args.file[1], 'r') as file:
-            previous_results = json.load(file)
+    reads2 = dict()
+    with gzip.open(args.files[1], 'rt') as file:
+        for record in SeqIO.parse(file, 'fastq'):
+            reads2[record.id.split('/')[0]] = str(record.seq)
             
-        #total_reads = previous_results['total_count']
-        #aligned_reads = previous_results['aligned_reads']
-            
-        kallisto_results = pd.read_csv(args.file[0], sep = '\t')
-
-    
-
-    idx_allele = defaultdict(set)
-    hla_indices = set()
-    for idx, gene in allele_idx.items():
-        if gene[:-1] in genes:
-            idx_allele[gene].add(idx)
-            hla_indices.add(int(idx))
-
-    lengths = defaultdict(float)
-    counts = defaultdict(float)
-    tpm = defaultdict(float)
-    for gene, indices in idx_allele.items():
-        for idx in indices:
-            counts[gene] += kallisto_results.loc[int(idx)]['est_counts']
-            lengths[gene] += kallisto_results.loc[int(idx)]['length']
-            tpm[gene] += kallisto_results.loc[int(idx)]['tpm']
-    '''
-    scale = aligned_reads/1e6
-    rpm = {idx:count/scale for idx, count in counts.items()}
-    rpkm = {idx: idx_rpm/(lengths[idx]/1000) for idx, idx_rpm in rpm.items()}
-
-    
-    gene_results = defaultdict(float)
-    gene_results['total_count'] = total_reads
-    gene_results['aligned_reads'] = aligned_reads
-    
-    allele_results = defaultdict(float)
-    allele_results['total_count'] = total_reads
-    allele_results['aligned_reads'] = aligned_reads
-    
-    for allele_id, allele in genotype.items():
-        allele_results[allele_id] = allele
-
-    total_hla_count = 0.
-    for gene, allele_ids in genes.items():
-        for allele_id in set(allele_ids):
-            gene_results[gene + '_count'] += counts[allele_id]
-            total_hla_count += counts[allele_id]
-            #gene_results[gene + '_rpkm'] += rpkm[allele_id]
-            gene_results[gene + '_tpm'] += tpm[allele_id]
-            
-            allele_results[allele_id + '_count'] = counts[allele_id]
-            #allele_results[allele_id + '_rpkm'] = rpkm[allele_id]
-            allele_results[allele_id + '_tpm'] = tpm[allele_id]
-    for gene, allele_ids in genes.items():
-        for allele_id in set(allele_ids):
-            baf = allele_results[gene + '1_count'] / (allele_results[gene + '1_count'] + allele_results[gene + '2_count'])
-            allele_results[gene + '_baf'] = min(baf, 1-baf)
-    '''
-    gene_results = {gene:defaultdict(int) for gene in genes}
-    
-    allele_results = {gene:defaultdict(float) for gene in genes}
-    
-    total_hla_count = 0
-    for allele_id, allele in genotype.items():
-        allele_results[allele_id[:-1]]['allele' + allele_id[-1]] = allele
-        total_hla_count += counts[allele_id]
-
-    for gene, allele_ids in genes.items():
-        for allele_id in set(allele_ids):
-            gene_results[gene]['count'] += round(counts[allele_id])
-            gene_results[gene]['tpm'] += round(tpm[allele_id])
-            if counts[allele_id]:
-                gene_results[gene]['abundance'] += counts[allele_id]/total_hla_count
-            
-            allele_results[gene]['allele' + allele_id[-1] + '_count'] = round(counts[allele_id])
-            allele_results[gene]['allele' + allele_id[-1] + '_tpm'] = round(tpm[allele_id])
-    for gene, allele_ids in genes.items():
-        for allele_id in set(allele_ids):
-            baf = allele_results[gene]['allele1_count'] / (allele_results[gene]['allele1_count'] + allele_results[gene]['allele2_count'])
-            allele_results[gene]['baf'] = round(min(baf, 1-baf),2)
-    for gene in genes:
-        gene_results[gene]['abundance'] = str(round(gene_results[gene]['abundance']*100,2)) + '%'
-    '''
-    print('-'*80)
-    print('[quant] Observed HLA genes:')
-
-    print('        {: <10}    {}    {}    {}'
-             .format('gene','count','   TPM',' abundance'))
-    for gene in sorted(genes):
-        print('        HLA-{: <6}    {: >5.0f}    {: >6.0f}    {: >9.2f}%'
-                 .format(gene, gene_results[gene + '_count'], gene_results[gene + '_tpm'], (gene_results[gene + '_count']/total_hla_count)*100))
-            
-    print('-'*80)
-    
-    
-    print('-'*80)
-    print('[quant] Observed HLA genes:')
-
-    print('        {: <10}    {: <12}    {}    {: <12}    {}'
-          .format('gene','allele 1','count','allele 2','count'))
-    
-    for gene in sorted(genes):
-        a1 = allele_results[gene + '1']
-        a2 = allele_results[gene + '2']
-        c1 = allele_results[gene+'1_count']
-        c2 = allele_results[gene+'2_count']
-        if c2 == 0: baf = 0
-        else: baf = min(c1/(c1+c2),c2/(c1+c2))
-        if not a2: a2 = ''
-        print('        HLA-{: <6}    {: <12}    {: >5.0f}    {: <12}    {: >5.0f}     {: > 5.2f}'
-                 .format(gene, a1, c1, a2, c2, baf))
-    
-    '''
-    
-    df = pd.DataFrame(allele_results).T
-    df.index.names = ['gene']
-    df = df[['allele1','allele2', 'allele1_count',  'allele2_count', 'allele2_tpm','allele1_tpm', 'baf']]
-    df.to_csv(allele_results_tsv,sep='\t')
-    
-    df = pd.DataFrame(gene_results).T
-    df.index.names = ['gene']
-    df = df[['count','tpm','abundance']]
-    df.to_csv(gene_results_tsv,sep='\t')
-    
-    with open(allele_results_json, 'w') as file:
-        json.dump(allele_results, file)
+    readIDs = list(reads1.keys())
         
-    with open(gene_results_json, 'w') as file:
-        json.dump(gene_results, file)
+    db, eq = build_de_bruijn(genotype, all_hlas)
+                
+    eq_count, eq_reads, eq_read_by_gene = hash_reads(readIDs, reads1, reads2, db, eq)
+                
         
-    if not args.keep_files: run_command(['rm -rf', temp])
-#-----------------------------------------------------------------------------
+    results = defaultdict(dict)
+    
+    genes = [gene for gene in eq_count.keys() if len(gene.split(',')) == 1]
+    
+    results['gene_count'] = {gene:eq_count[gene] for gene in genes}
+    total_count = sum(results['gene_count'].values())
+    results['gene_abundance'] = {gene:eq_count[gene]/total_count for gene in genes}
+    results['genotyped_genes'] = sorted(genotype_genes)
+    
+    for gene in sorted(genotype_genes):
+        a1 = allele_mapping_single[input_genotype[gene + '1']][0]
+        a2 = allele_mapping_single[input_genotype[gene + '2']][0]
+        
+        results[gene]['allele1'] = a1
+        results[gene]['allele2'] = a1
+            
+        kmers_mismatch, kmers_allele, n, mismatch_locations = find_mismatches(a1, a2)
+
+        results[gene]['mismatch_locations'] = mismatch_locations
+        results[gene]['n_mismatches_sites'] = n
+                 
+        mismatch_coverage, mismatch_genes = get_mismatch_coverage(gene, args.count_both_reads)
+        
+        #results[gene]['mismatch_genes'] = {i:{k:Counter(l) for k,l in j.items()} for i, j in mismatch_genes.items()}
+        results[gene]['mismatch_genes'] = {i:[Counter(k) for k in j] for i, j in mismatch_genes.items()}
+        
+        cov1 = [x[1] for x in mismatch_coverage.values()]
+        cov2 = [x[2] for x in mismatch_coverage.values()]
+        
+        results[gene]['allele_count'] = [cov1, cov2]
+        
+        baf1 = [i/(i + j) for i,j in zip(cov1, cov2)]
+        baf2 = [j/(i + j) for i,j in zip(cov1, cov2)]
+        
+        results[gene]['allele_freq'] = [baf1, baf2]
+        
+    json.dump(results, open(args.outdir + '/' + args.sample + '.json','w'))
+#-------------------------------------------------------------------------------

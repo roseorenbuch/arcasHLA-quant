@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 #-------------------------------------------------------------------------------
-#   genotype.py: genotypes from extracted chromosome 6 reads.
+#   genotype.py: genotypes from extracted reads.
 #-------------------------------------------------------------------------------
 
 #-------------------------------------------------------------------------------
@@ -44,10 +44,8 @@ from reference import check_ref
 from arcas_utilities import *
 from align import *
 
-#-------------------------------------------------------------------------------
-
-__version__     = '0.2'
-__date__        = '2019-04-02'
+__version__     = '0.2.0'
+__date__        = '2019-06-26'
 
 #-------------------------------------------------------------------------------
 #   Paths and filenames
@@ -327,8 +325,9 @@ def predict_genotype(eqs, allele_idx, allele_eq, em_results, gene_count,
     
         # If more than one pair has the same number of explained reads
         # use allele frequency priors to break the tie
+        pair_prior = dict()
+        
         if len(top_by_reads) > 1 and population:
-            pair_prior = dict()
             for a1,a2 in top_by_reads.keys():
                 allele1 = process_allele(allele_idx[a1[0]][0],2)
                 allele2 = process_allele(allele_idx[a2[0]][0],2)
@@ -337,7 +336,9 @@ def predict_genotype(eqs, allele_idx, allele_eq, em_results, gene_count,
 
                 pair_prior[(a1,a2)] =   prior[allele1][population] \
                                       * prior[allele2][population]
-                                          
+            
+            
+        if pair_prior:
             max_prior = max(pair_prior.values())
             pair_prior = {pair:prior for pair,prior in pair_prior.items() 
                           if prior >= max_prior}
@@ -363,19 +364,19 @@ def predict_genotype(eqs, allele_idx, allele_eq, em_results, gene_count,
         elif a1_count == 0:
             log.info('[genotype] Likely heterozygous: minor allele has no '+
                      'nonshared reads')
-            genotype = [a2, a2]
+            genotype = [a2]
         elif a2_count == 0:
             log.info('[genotype] Likely heterozygous: minor allele has no '+
                      'nonshared reads')
-            genotype = [a1, a1]
+            genotype = [a1]
         elif min(a1_count/a2_count, a2_count/a1_count) < zygosity_threshold:
             log.info(f'[genotype] Likely homozygous: minor/major '+
                       'nonshared count {:.2f}'
                       .format(min(a1_count/a2_count, a2_count/a1_count)))
             if a1_count > a2_count:
-                genotype = [a1, a1]
+                genotype = [a1]
             else:
-                genotype = [a2, a2]
+                genotype = [a2]
         else:
             log.info(f'[genotype] Likely heterozygous: minor/major '+
                       'nonshared count {:.2f}'
@@ -391,7 +392,7 @@ def predict_genotype(eqs, allele_idx, allele_eq, em_results, gene_count,
         pair_count = get_count(a1)
         a1_count = pair_count
         a2_count = None
-        genotype = [process_allele(alleles[0], 3),process_allele(alleles[0], 3)]
+        genotype = [process_allele(alleles[0], 3),]
         
     return genotype, pair_count
 
@@ -593,6 +594,13 @@ if __name__ == '__main__':
                         default=0.15, 
                         metavar='')
     
+    parser.add_argument('--min_count', 
+                        type=int,
+                        help='minimum gene read count required for genotyping ' +
+                             '\n  default: 75\n\n',
+                        default=75, 
+                        metavar='')
+    
     parser.add_argument('-o',
                         '--outdir',
                         type=str,
@@ -625,21 +633,18 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     if len(args.file) == 0:
-        sys.exit('[genotype] Error: FASTQ or alignment.p file required')
+        sys.exit('[genotype] Error: FASTQ or alignment.p file required.')
     
+    # Set up temporary and output folders, log file
     sample = os.path.basename(args.file[0]).split('.')[0]
-    
     outdir = check_path(args.outdir)
     temp = create_temp(args.temp)
-    
     if args.log:
         log_file = args.log
     else:
-        log_file = ''.join([outdir,sample,'.genotype.log'])
-        
+        log_file = ''.join([outdir,sample,'.genotype.log'])  
     with open(log_file, 'w'):
         pass
-    
     if args.verbose:
         handlers = [log.FileHandler(log_file), log.StreamHandler()]
         
@@ -660,14 +665,15 @@ if __name__ == '__main__':
     log.info(f'[log] Sample: %s', sample)
     log.info(f'[log] Input file(s): %s', f'\n\t\t     '.join(args.file))
         
+    # Load HLA frequencies
     prior = pd.read_csv(hla_freq, delimiter='\t')
     prior = prior.set_index('allele').to_dict('index')
        
-    # checks if HLA reference exists
+    # Checks if HLA reference exists
     check_path(rootDir + 'dat/ref')
     check_ref()
     
-    # loads reference information
+    # Loads reference information
     with open(hla_p, 'rb') as file:
         reference_info = pickle.load(file)
         (commithash,(gene_set, allele_idx, 
@@ -684,32 +690,37 @@ if __name__ == '__main__':
         
     commithash, eq_idx, allele_eq, paired, align_stats, gene_stats = alignment_info
 
+    # Set up EM parameters
     if not args.drop_iterations:
         if paired: args.drop_iterations = 20
         else: args.drop_iterations = 4
         
     em_results = dict()
     genotypes = dict()
-        
+    
     hline()
     log.info('[genotype] Genotyping parameters:')
     log.info(f'\t\tpopulation: %s', args.population)
+    log.info(f'\t\tminimum count: %s', args.min_count)
     log.info(f'\t\tmax iterations: %s', args.max_iterations)
     log.info(f'\t\ttolerance: %s', args.tolerance)
     log.info(f'\t\tdrop iterations: %s', args.drop_iterations)
     log.info(f'\t\tdrop threshold: %s', args.drop_threshold)
     log.info(f'\t\tzygosity threshold: %s', args.zygosity_threshold)
     
+    # For each HLA locus, perform EM then scoring
     for gene in args.genes:
         hline()
         log.info(f'[genotype] Genotyping HLA-{gene}')
         
-        if gene not in gene_stats or gene_stats[gene][0] == 0:
-            log.info(f'[genotype] No reads aligned to HLA-{gene}') 
+        # Skips loci with not enough reads to genotype
+        if gene not in gene_stats or gene_stats[gene][0] < args.min_count:
+            log.info(f'[genotype] Not enough reads aligned to HLA-{gene} to genotype.') 
             continue
         gene_count, eq_count, abundance = gene_stats[gene]
         log.info(f'[genotype] {gene_count:.0f} reads aligned to HLA-{gene} '+
                  f'in {eq_count} classes')
+            
             
         em, genotype = genotype_gene(gene,
                                      gene_count,

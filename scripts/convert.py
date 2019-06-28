@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 #-------------------------------------------------------------------------------
-#   convert.py: converts HLA nomenclature and resolution.
+#   convert.py: changes HLA resolution and converts nomenclature to p/g-groups.
 #-------------------------------------------------------------------------------
 
 #-------------------------------------------------------------------------------
@@ -22,22 +22,90 @@
 #   along with arcasHLA.  If not, see <https://www.gnu.org/licenses/>.
 #-------------------------------------------------------------------------------
 
+import sys
 import os
 import json
 import argparse
 import pandas as pd
+import pickle
 
 from argparse import RawTextHelpFormatter
+from os.path import isfile, isdir, dirname, realpath
 
-from arcas_utilities import check_path
-
-#-------------------------------------------------------------------------------
-
-__version__     = '0.2'
-__date__        = '2019-04-02'
+from arcas_utilities import check_path, process_allele
 
 #-------------------------------------------------------------------------------
-    
+
+__version__     = '0.2.0'
+__date__        = '2019-06-26'
+
+#-------------------------------------------------------------------------------
+#   Paths and fileames
+#-------------------------------------------------------------------------------
+
+rootDir = dirname(realpath(__file__)) + '/../'
+
+hla_convert = rootDir + 'dat/ref/hla.convert.p'
+
+#-------------------------------------------------------------------------------
+        
+def convert_allele(allele, resolution):
+    '''Checks nomenclature of input allele and returns converted allele.'''
+    i = len(allele.split(':'))
+        
+    # Input: P-group allele
+    if allele[-1] == 'P':
+        if resolution == 'g-group': 
+            sys.exit('[convert] Error: p-group cannot be converted ' +
+                     'to g-group.')
+
+        # Output: 1-field allele unless forced
+        elif type(resolution) == int:
+            if resolution > 1 and not args.force:
+                sys.exit('[convert] Error: p-group cannot be ' +
+                         'converted to %.0f fields.' %resolution)
+            allele = process_allele(allele[:-1], resolution)
+
+    # Input: G-group allele
+    elif allele[-1] == 'G':
+
+        # Output: 1-field allele unless forced
+        if type(resolution) == int:
+            if resolution > 1 and not args.force:
+                sys.exit('[convert] Error: g-group cannot be converted' +
+                         'to %.0f fields.' %resolution)
+            allele = process_allele(allele[:-1], resolution)
+            
+        # Output: P-group allele
+        elif resolution == 'p-group': 
+            if allele[:-1] in p_group[i]:
+                allele = p_group[i][allele[:-1]]
+
+            elif process_allele(allele[:-1], i - 1) in p_group[i]:
+                allele = p_group[i][process_allele(allele[:-1], i -1)]
+
+    # Input: ungrouped allele
+    # Output: G-group allele
+    elif resolution == 'g-group':
+        if allele in g_group[i]:
+            allele = g_group[i][allele]
+        elif allele[-1] != 'N':
+            allele = process_allele(allele,3)
+
+    # Input: ungrouped allele
+    # Output: P-group allele
+    elif resolution == 'p-group':
+        if allele in p_group[i]:
+            allele = p_group[i][allele]
+            
+    # Input: ungrouped allele
+    # Output: reduced resolution, ungrouped allele
+    elif type(resolution) == int:
+        allele = process_allele(allele, resolution)
+        
+    return allele
+
+#-------------------------------------------------------------------------------
 
 if __name__ == '__main__':
     
@@ -47,8 +115,8 @@ if __name__ == '__main__':
                                      formatter_class=RawTextHelpFormatter)
     
     parser.add_argument('file', 
-                        help='tsv or json containing HLA genotypes\n\n', 
-                        nargs='*',
+                        help='tsv containing HLA genotypes, see github for ' +
+                              'example file structure.\n\n',
                         type=str)
     
     parser.add_argument('-h',
@@ -56,37 +124,27 @@ if __name__ == '__main__':
                         action = 'help',
                         help='show this help message and exit\n\n',
                         default=argparse.SUPPRESS)
+    
+    parser.add_argument('-r',
+                        '--resolution',
+                        help = 'output resolution (1,2,3) or grouping ' + 
+                               '(g-group, p-group)\n\n',
+                        metavar='')
 
     parser.add_argument('-o',
                         '--outfile',
                         type=str,
-                        help='out directory\n\n',
+                        help='output file\n  default: ' +
+                             './file_basename.resolution.tsv\n\n',
                         default='',
                         metavar='')
-
-    parser.add_argument('--resolution',
-                    type = int,
-                    help = 'output resolution (1,2,3,4), must be equal or lower to input resolution',
-                    default = 3,
-                    metavar = '')
     
-    parser.add_argument('--grouping',
-                        type = str,
-                        help = 'allele grouping (g-group, p-group, supertype) [default = False]',
-                        default = False,
-                        metavar = '')
-    
-    parser.add_argument('--input_nomenclature',
-                        type = str,
-                        help = 'input nomenclature (current, pre-2009, polysolver), automatically detects current vs polysolver',
-                        default = '',
-                        metavar = '')
-    
-    parser.add_argument('--output_nomenclature',
-                        type = str,
-                        help = 'input nomenclature (current, polysolver)',
-                        default = 'current',
-                        metavar = '')
+    parser.add_argument('-f',
+                        '--force',
+                        help = 'force conversion for grouped alleles even if ' +
+                                'it results in loss of resolution',
+                        action = 'count',
+                        default=False)
     
     parser.add_argument('-v',
                         '--verbose', 
@@ -95,55 +153,46 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    outdir = check_path(args.outdir)
+    p_group, g_group = pickle.load(open(hla_convert,'rb'))
     
-    if os.path.isdir(args.input):
+    
+    # Check input resolution
+    accepted_fields = {'1','2','3','4'}
+    accepted_groupings = {'g-group','p-group'}
         
-        # add convert polysolver output
+    resolution = None
+
+    if args.resolution in accepted_fields:
+        resolution = int(args.resolution)
+    elif args.resolution.lower() in accepted_groupings:
+        resolution = args.resolution.lower()
         
-        indir = check_path(args.input)
+    if not resolution:
+        sys.exit('[convert] Error: output resolution is needed ' +
+                 '(1, 2, 3, g-group, p-group).')
     
-        genotype_files, partial_files, count_files, quant_files = get_paths(indir)
     
-        if genotype_files:
-            process_json(genotype_files, 
-                         indir, 
-                         outdir, 
-                         args.run, 
-                         'genotypes.json')
-
-        if partial_files:
-            process_json(partial_files, 
-                         indir, 
-                         outdir,  
-                         args.run, 
-                         'partial_genotypes.json')
-        if count_files:
-            process_count(count_files,
-                         indir,
-                         outdir,
-                         args.run,
-                         'counts.tsv')
-
-        if quant_files:
-            process_quant(quant_files, 
-                         indir, 
-                         outdir,  
-                         args.run, 
-                         'quant.tsv')
+    # Create outfile name
+    if not args.outfile:
+        outfile = [os.path.splitext(os.path.basename(args.file))[0],
+                   args.resolution.lower(),
+                   'tsv']
+        outfile = '.'.join(outfile)
     else:
-        # check input type: current, pre-2009 (only if Cw), polysolver
-        # check input resolution: number of fields
-        # warn if number of fields is inconsistent
+        outfile = args.outfile
         
-        # output type is default: output current nomenclature, same number of fields as input
-        # change resolution: warn if output resolution > input resolution (take the first allele)
-        # change output type:
-        #    polysolver - increase resolutions with warning, warn if allele is missing, 
-        #                 take nearest neighbor by ambiguity then by numerical order
-        #                 option to output to individual files (input for LOHHLA)
-        #    ambiguity - output with "g" ending
-        #    super-groups - output based on supergrouping
-        pass
+    # Load input genotypes
+    df_genotypes = pd.read_csv(args.file, sep = '\t').set_index('subject')
+    genotypes = df_genotypes.to_dict('index')
+    
+
+    for subject, genotype in genotypes.items():
+        for gene, allele in genotype.items():
+            if type(allele) != str:
+                continue
+
+            genotypes[subject][gene] = convert_allele(allele, resolution)
+
+    pd.DataFrame(genotypes).T.rename_axis('subject').to_csv(outfile, sep = '\t')
         
 #-------------------------------------------------------------------------------

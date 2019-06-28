@@ -28,10 +28,8 @@ import logging as log
 import uuid
 from subprocess import PIPE, STDOUT, run
 
-#-------------------------------------------------------------------------------
-
-__version__     = '0.2'
-__date__        = '2019-04-02'
+__version__     = '0.2.0'
+__date__        = '2019-06-26'
 
 #-------------------------------------------------------------------------------
 
@@ -79,7 +77,6 @@ def remove_files(files, keep_files):
 def run_command(command, message = ''):
     '''Outputs message and command to log, runs command and returns output.'''
     if type(command) == list:
-        command = [str(i) for i in command]
         command = ' '.join(command)
 
     if message: 
@@ -96,6 +93,7 @@ def run_command(command, message = ''):
     return output
 
 def create_temp(temp):
+    '''Generates name for temporary folder.'''
     temp = check_path(temp)
     temp_folder = ''.join([temp,'arcas_' + str(uuid.uuid4())])
     return check_path(temp_folder)

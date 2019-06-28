@@ -1,244 +1,62 @@
-# arcasHLA: high resolution HLA typing from RNA seq #
-
-arcasHLA performs high resolution genotyping for HLA class I and class II genes from RNA sequencing, supporting both paired and single-end samples.
-
-# arcasHLA quantification #
+# arcasHLA quantification v2 #
 
 ## Setup ##
 ```
 git clone https://github.com/roseorenbuch/arcasHLA.git
-cd arcasHLA
-wget https://www.dropbox.com/s/pcmwc4o1dxw7owk/arcasHLA-quant_reference.zip
-unzip arcasHLA-quant_reference.zip
 ```
-## Build Customized References ##
-#### Input: arcasHLA genotype.json ####
-An individual customized reference can be built from arcasHLA genotype output.
-```
-./arcasHLA quant_ref subject.genotype.json -o ~/ref
-```
-#### Input: arcasHLA merged genotypes.json ####
-Customized references can be built from merged arcasHLA genotype outputs.
-```
-./arcasHLA quant_ref genotypes.json -o ~/ref
-```
-#### Input: HLA tsv ####
-
-Customized references can be built from a tab-separated file with the following structure:
-
-| subject | A1      | A2      | B1      | B2      | C1      | C2      |
-|---------|---------|---------|---------|---------|---------|---------|
-| Example | A*01:01 | A*02:01 | B*07:01 | B*52:01 | C*04:01 | C*18:01 |
-
-```
-./arcasHLA quant_ref hla.tsv -o ~/ref
-```
-#### Options: ####
-- `--chr6`            : build reference with only chr6 transcripts instead of entire transcriptome *(default: False)
-- `--mode MODE`            : single (lowest digit allele only), protein-group (all transcripts with the same 2-field type), G-group (all transcripts with the same antigen-binding region) *(default: protein-group)                                                      
-- `--o, --outdir DIR` : output directory *(default: `.`)                                                                               
-- `--temp DIR`        : temp directory *(default: `/tmp`)                                                                              
-- `--keep_files`      : keep intermediate files *(default: False)                                                                      
-- `-t, --threads INT` : number of threads *(default: 1)                                                                                
-- `-v, --verbose`     : verbosity *(default: False)                
+## Extract ##
+arcasHLA extract now extracts pairs with one or both mates aligned to an HLA locus (all HLA genes and pseudogenes). Add `--chr6` if you want to extract all reads aligned to chromosome 6.
 
 
-## Quantification ##
-Note: if the reference was built with the `--chr6` flag, you should run `quant` with extracted chromosome 6 FASTQs (see `extract`).
+## Mismatch Quantification ##
 
-```
-./arcasHLA quant --ref /path/to/ref/sample FASTQ
-```
+#### Necessary Input ####
+- `--subject SUBJECT` : subject name (to locate genotype in genotype tsv file)
+- `--sample SAMPLE` : sample name (for output file)
+- `--genotypes FILE` : genotypes.tsv (see below for necessary format)
 
-Example:
-```
-./arcasHLA quant --ref ~/ref/Pt23 -t 8 -o /Volumes/quant/ /Volumes/fastq/Pt23_pre.1.fq.gz /Volumes/f
-astq/Pt23_pre.2.fq.gz
-```
-
-## Merge ##
-Merge will create a tsv file containing all the quantification results ("run.quant.tsv").
-```
-./arcasHLA merge -i /Volumes/quant/ --run test -o ./
-```
-Merge will also now create a tsv file containing all gene counts when supplied a folder with ".genotype.log" files.
-
-### Dependencies ###
-Make sure the following programs are in your `PATH`:
-- [Samtools](http://www.htslib.org/)
-- [bedtools](http://bedtools.readthedocs.io/)
-- [pigz](https://zlib.net/pigz/)
-- [Kallisto v0.44.0](https://pachterlab.github.io/kallisto/)
-- Python 3.6
-- GNU Parallel
-
-arcasHLA requires the following Python modules:
-- [Biopython](https://biopython.org/wiki/Download)
-- NumPy
-- SciPy
-- Pandas
-
-### Test ###
-In order to test arcasHLA partial typing, we need to roll back the reference to an earlier version. First, fetch IMGT/HLA database version 3.24.0:
-```
-./arcasHLA reference --version 3.24.0
-```
-Extract reads:
-```
-./arcasHLA extract test/test.bam -o test/output --paired -t 8 -v
-```
-Complete typing:
-```
-./arcasHLA genotype test/output/test.extracted.1.fq.gz test/output/test.extracted.2.fq.gz -g A,B,C,DPB1,DQB1,DQA1,DRB1 -o test/output -t 8 -v
-```
-Expected output in `test/output/test.genotype.json`:
-```
-{"A": ["A*01:01:01", "A*03:01:01"], 
- "B": ["B*39:01:01", "B*07:02:01"], 
- "C": ["C*08:01:01", "C*01:02:01"], 
- "DPB1": ["DPB1*14:01:01", "DPB1*02:01:02"], 
- "DQA1": ["DQA1*02:01:01", "DQA1*05:03"], 
- "DQB1": ["DQB1*02:02:01", "DQB1*06:09:01"], 
- "DRB1": ["DRB1*10:01:01", "DRB1*14:02:01"]}
-```
-Partial typing:
-```
-./arcasHLA partial test/output/test.extracted.1.fq.gz test/output/test.extracted.2.fq.gz -g A,B,C,DPB1,DQB1,DQA1,DRB1 -G test/output/test.genotype.json -o test/output -t 8 -v
-```
-Expected output in `test/output/test.partial_genotype.json`:
-```
-{"A": ["A*01:01:01", "A*03:01:01"], 
- "B": ["B*07:02:01", "B*39:39:01"],
- "C": ["C*08:01:01", "C*01:02:01"], 
- "DPB1": ["DPB1*14:01:01", "DPB1*02:01:02"], 
- "DQA1": ["DQA1*02:01:01", "DQA1*05:03"], 
- "DQB1": ["DQB1*06:04:01", "DQB1*02:02:01"],
- "DRB1": ["DRB1*03:02:01", "DRB1*14:02:01"]}
-```
-Before further usage, remember to update to the 3.34.0.
-```
-./arcasHLA reference --version 3.34.0
-```
-At this time, cloning the latest version of IMGTHLA (3.35.0) results in a corrupted database due to an issue with GitHub's Large File Storage. To update the arcasHLA's reference to the current version, run the following commands.
-```
-curl https://media.githubusercontent.com/media/ANHIG/IMGTHLA/Latest/hla.dat > dat/IMGTHLA/hla.dat
-./arcasHLA reference --rebuild --v
-```
-
-### Usage ###
-
-To see the list of available tools, simply enter `arcasHLA`. To view the required and optional arguments for any of the tools enter `arcasHLA [command] -h`.
-
-- `extract` : Extracts reads mapped to chromosome 6 and any HLA decoys or chromosome 6 alternates.
-- `genotype` : Genotypes complete HLA alleles from extracted reads.
-- `partial` : Genotypes partial HLA alleles from extracted reads and output from `genotype`.
-- `reference` : Update, specify version or force rebuilding of HLA reference.
-- `merge` : merge genotyping output for multiple samples into a single json file.
-
-### Extract reads ###
-
-arcasHLA takes sorted BAM files and extracts chromosome 6 reads and related HLA sequences. If the BAM file is not indexed, this tool will run samtools index before extracting reads. By default, `extract` outputs a single FASTQ file; use the `--paired` flag for paired-end samples.
-
-    arcasHLA extract [options] /path/to/sample.bam 
-    
-Output: `sample.1.fq.gz`, `sample.2.fq.gz`
-
-#### Options: ####
-- `--paired`          : paired-end reads (default: False)                                                                             
-- `--unmapped`        : include unmapped reads, recommended if the aligner used marks multimapping reads as unmapped (default: False) 
-- `--log FILE`        : log file for run summary (default: sample.extract.log)                                                        
-- `--o, --outdir DIR` : output directory (default: `.`)                                                                               
-- `--temp DIR`        : temp directory (default: `/tmp`)                                                                              
-- `--keep_files`      : keep intermediate files (default: False)                                                                      
-- `-t, --threads INT` : number of threads (default: 1)                                                                                
-- `-v, --verbose`     : verbosity (default: False)                
-
-### Genotype - complete ###
-
-#### From FASTQs ####
-To predict the most likely genotype (complete alleles), input the FASTQs produced by `extract`.
-
-```
-arcasHLA genotype [options] /path/to/sample.1.fq.gz /path/to/sample.2.fq.gz
-```
-
-Output: `sample.alignment.p`, `sample.em.json`, `sample.genotype.json`
-
-#### From intermediate alignment file ####  
-If you have previously run `genotype` on a sample, you can run `genotype` again directly from `sample.alignment.p` to retype without aligning with Kallisto again. This is useful if you want to try different populations, genes and other parameters.
-```
-arcasHLA genotype [options] /path/to/sample.alignment.p
-``` 
-#### Example `.genotype.json` ####
-
-```
-{'A': ['A*01:01:01', 'A*29:02:01'],
- 'B': ['B*08:01:01', 'B*44:03:01'],
- 'C': ['C*07:01:01', 'C*16:01:01'],
- 'DQA1': ['DQA1*02:01:01', 'DQA1*05:01:01'],
- 'DQB1': ['DQB1*02:01:01', 'DQB1*02:02:01'],
- 'DRB1': ['DRB1*03:01:01', 'DRB1*07:01:01']}
-```
+| subject      	| A1         	| A2         	| B1         	| B2         	| C1         	| C2         	|
+|--------------	|------------	|------------	|------------	|------------	|------------	|------------	|
+| subject_name 	| A*01:01:01 	| A*01:01:01 	| B*07:02:01 	| B*07:02:01 	| C*04:01:01 	| C*04:01:01 	|
 
 #### Options ####
-- `-g, --genes GENES`       : comma separated list of HLA genes (ex. A,B,C,DQA1,DQB1,DRB1)
-- `-p, --population POPULATION`  : sample population, options are asian_pacific_islander, black, caucasian, hispanic, native_american and prior (default: Prior)
-- `--tolerance FLOAT` : convergence tolerance for transcript quantification (default: 10e-7)
-- `--max_iterations INT` : maximmum number of iterations for transcript quantification (default: 1000)
-- `--drop_iterations INT` : number of iterations before dropping low support alleles, a lower number of iterations is recommended for single-end and low read couunt samples (default: paired - 10, single - 4)
-- `--drop_threshold FLOAT` : proportion of maximum abundance an allele needs to not be dropped (default: 0.1)
-- `--zygosity_threshold FLOAT` : threshold for ratio of minor to major allele nonshared count to determine zygosity (default: 0.15)
-- `--log FILE`        : log file for run summary (default: sample.genotype.log)                                                        
-- `--o, --outdir DIR` : output directory (default: `.`)                                                                               
-- `--temp DIR`        : temp directory (default: `/tmp`)                                                                              
-- `--keep_files`      : keep intermediate files (default: False)                                                                      
-- `-t, --threads INT` : number of threads (default: 1)                                                                                
-- `-v, --verbose`     : verbosity (default: False)   
+- `--mapping MAPPING` : single, 2-field, g-group (default: g-group)
+- `--count_both_reads` : if both mates overlap the same mismatch, both reads contribute to read count.
+- `-k INT` : k-mer length (default: 31)
+- `-o, --outdir` : out directory
 
-### Genotype - partial ###
-Following genotyping, partial alleles can be predicted. This requires aligning the reads to an alternate, partial allele reference. The `sample.genotype.json` file from the previous step is required.
 
+#### Example ####
 ```
-arcasHLA partial [options] -G /path/to/sample.genotype.json /path/to/sample.1.fq.gz /path/to/sample.2.fq.gz
-```
-   
-Output: `sample.partial_alignment.p`, `sample.partial_genotype.json`
-
-The options for partial typing are the same as complete. Partial typing, like complete, can be run from the intermediate alignment file.
- 
-### Merge jsons ###
-To make analysis easier, this command will merge all jsons produced by genotyping. All `.genotype.json` files will be merged into a single `run.genotypes.json` file and all `.partial_genotype.json` files will be merged into `run.partial_genotypes.json`.
-```
-arcasHLA merge [options]
-```
-#### Options ####
-- `--run RUN` : run name
-- `--i, --indir DIR` : input directory (default: `.`)     
-- `--o, --outdir DIR` : output directory (default: `.`)                                                                  
-- `-v, --verbose`     : verbosity (default: False)   
-
-### Change reference ###
-To update the reference to the latest IMGT/HLA version, run
-
-```
-arcasHLA reference --update
-```
-If you are running multiple tools to type HLAs, it can be helpful to use the same version of IMGT/HLA. You can select the version you like using the commithash from the [IMGT/HLA Github](https://github.com/ANHIG/IMGTHLA/commits/Latest).
-
-```
-arcasHLA reference --version [commithash]
+./arcasHLA quant --subject Pt23 \
+                 --sample Pt23_pre \
+                 --genotypes riaz.genotypes.tsv \
+                 /Volumes/riaz_rna/filtered/Pt23_pre.filtered.1.fq.gz \
+                 /Volumes/riaz_rna/filtered/Pt23_pre.filtered.2.fq.gz
 ```
 
-If you suspect there is an issue  with the reference files, rebuild the reference with the following command
-```
-arcasHLA reference --rebuild
-```
-#### Options ####
-- `--update` : update to latest IMGT/HLA version
-- `--version` : checkout IMGT/HLA version using commithash
-- `--rebuild` : rebuild HLA database
-- `-v, --verbose`     : verbosity (default: False)   
+The resulting json file follows the following dictionary:
 
-## Citation ##
-R. Orenbuch, I. Filip, D. Comito, J. Shaman, I. Pe’er, and R. Rabadan. arcasHLA:
-high resolution HLA typing from RNA seq. bioRxiv doi: [10.1101/479824](https://doi.org/10.1101/479824)
+```python
+'genotyped_genes' : [A, B, C, ...] # Based on genotypes.tsv
+'gene_count'      : {gene : count, ...} # Count of unique reads, gene == "" denotes unaligned reads
+'gene_abundance'  : {gene : abundance, ...} # Relative abundance based on unique read count
+gene              : {#described below}
+```
+
+This dictionary also contains a dictionary for each genotyped gene with the following objects.
+```python
+'allele1' : str # allele 1
+'allele2' : str # allele 2
+'n_mismatches_sites' : int # number of mismatches
+'mismatch_locations' : {mismatch: [allele1_idx, allele2_idx], ...} # mismatch locations
+```
+For each read pair that uniquely maps to one allele and overlaps the mismatch, add the gene eq class to a list then count the number of times each gene is seen.
+```python
+'mismatch_genes' : {mismatch: [Counter(allele1_genes), Counter(allele2_genes)], ...}
+```
+The counts and frequencies for each allele are stored as lists.
+```python
+'allele_count' : [allele1_count, allele2_count],
+'allele_freq' : [allele1_freq, allele2_freq]
+```
