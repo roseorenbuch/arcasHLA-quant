@@ -63,6 +63,7 @@ __date__        = '2019-04-02'
 rootDir            = os.path.dirname(os.path.realpath(__file__)) + '/../'
 cDNA_p             = rootDir + 'dat/ref/cDNA.p'
 cDNA_single_p      = rootDir + 'dat/ref/cDNA.single.p'
+allele_groups_p    = rootDir + 'dat/ref/allele_groups.p'
 GRCh38_chr6        = rootDir + 'dat/ref/GRCh38.chr6.noHLA.fasta'
 GRCh38             = rootDir + 'dat/ref/GRCh38.all.noHLA.fasta'
 HLA_json           = rootDir + 'dat/ref/hla_transcripts.json'
@@ -91,7 +92,7 @@ def build_custom_reference(subject, genotype, grouping, transcriptome_type, temp
         for transcript in HLA_transcripts[gene]:
             transcriptome.append(dummy_HLA_dict[transcript])
      
-    with open('dat/ref/allele_groups.p','rb') as file:
+    with open(allele_groups_p,'rb') as file:
         groups = pickle.load(file)
     with open(cDNA_p,'rb') as file:
         cDNA = pickle.load(file)    
