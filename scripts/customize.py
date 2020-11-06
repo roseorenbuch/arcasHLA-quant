@@ -136,7 +136,7 @@ def build_custom_reference(subject, genotype, grouping, transcriptome_type, temp
      
     for transcript in transcriptome:
         allele_idx[str(idx)] = transcript.id
-        lengths[str(idx)] = len(seq)
+        lengths[str(idx)] = len(transcript.seq)
 
         record = SeqRecord(transcript.seq,
                            id=str(idx),
