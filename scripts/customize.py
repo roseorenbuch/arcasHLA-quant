@@ -40,7 +40,6 @@ from textwrap import wrap
 from collections import Counter, defaultdict
 from itertools import combinations
 
-from Bio.Alphabet import generic_dna
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.Align import MultipleSeqAlignment
@@ -61,18 +60,17 @@ __date__        = '2019-04-02'
 #-------------------------------------------------------------------------------
 
 rootDir            = os.path.dirname(os.path.realpath(__file__)) + '/../'
-cDNA_p             = rootDir + 'dat/ref/cDNA.p'
-cDNA_single_p      = rootDir + 'dat/ref/cDNA.single.p'
+custom_p           = rootDir + 'dat/ref/hla_custom.p'
+hla_fa             = rootDir + 'dat/ref/hla.fasta'
 GRCh38_chr6        = rootDir + 'dat/ref/GRCh38.chr6.noHLA.fasta'
 GRCh38             = rootDir + 'dat/ref/GRCh38.all.noHLA.fasta'
 HLA_json           = rootDir + 'dat/ref/hla_transcripts.json'
 dummy_HLA_fa       = rootDir + 'dat/ref/GRCh38.chr6.HLA.fasta'
-parameters = rootDir + 'dat/info/parameters.p'
+parameters         = rootDir + 'dat/info/parameters.p'
 
 #-------------------------------------------------------------------------------
 
 def build_custom_reference(subject, genotype, grouping, transcriptome_type, temp):
-    print(genotype)
     
     dummy_HLA_dict = SeqIO.to_dict(SeqIO.parse(dummy_HLA_fa, 'fasta')) 
     
@@ -91,12 +89,13 @@ def build_custom_reference(subject, genotype, grouping, transcriptome_type, temp
         for transcript in HLA_transcripts[gene]:
             transcriptome.append(dummy_HLA_dict[transcript])
      
-    with open('dat/ref/allele_groups.p','rb') as file:
-        groups = pickle.load(file)
-    with open(cDNA_p,'rb') as file:
-        cDNA = pickle.load(file)    
-    with open(cDNA_single_p,'rb') as file:
-        cDNA_single = pickle.load(file)
+    with open(custom_p,'rb') as file:
+        commithash, (single_idx, group_idx, binding_idx) = pickle.load(file)
+        
+    if grouping == 'single': seq_idx = single_idx
+    elif grouping == 'g-group': seq_idx = binding_idx
+    else: seq_idx = group_idx
+    fasta_sequences = [str(i.seq) for i in list(SeqIO.parse(open(hla_fa),'fasta'))]
     
     indv_fasta = ''.join([temp,subject,'.fasta'])
     indv_idx  = ''.join([outdir,subject,'.idx'])
@@ -113,12 +112,7 @@ def build_custom_reference(subject, genotype, grouping, transcriptome_type, temp
     for allele_id, allele in genotype.items():
         gene = get_gene(allele)
         
-        if grouping == 'single':
-            sequences = [cDNA_single[allele]]
-        elif grouping == 'g-group':
-            sequences = [seq for a in groups[allele] for seq in cDNA[a]]
-        else:
-            sequences = [seq for seq in cDNA[allele]]
+        sequences = [fasta_sequences[i] for i in seq_idx[allele]]
             
         for seq in sequences:
             hla_idx[allele_id].append(str(idx))
@@ -148,10 +142,8 @@ def build_custom_reference(subject, genotype, grouping, transcriptome_type, temp
 
     with open(indv_p, 'wb') as file:
         pickle.dump([genes,genotype,hla_idx,allele_idx,lengths], file)
-        
 
     output = run_command(['kallisto', 'index','-i', indv_idx, indv_fasta])
-    print(output)
 
 def process_json_genotype(input_genotype, genes):
     genotype = dict()
@@ -286,18 +278,14 @@ if __name__ == '__main__':
             subject = args.subject
         else:
             subject = os.path.basename(args.genotype).split('.')[0]
-        print('HERE')
         if args.verbose: print('[quant] Building reference for', subject)
         
         with open(args.genotype, 'r') as file:
             input_genotype = json.load(file)
         
         genotype = process_json_genotype(input_genotype, genes)
-        print(genes)
-        print(genotype)
         
         build_custom_reference(subject, genotype, args.grouping, args.transcriptome, temp)
-        print('done')
         
                 
     elif args.genotype.endswith('.genotypes.json') or args.genotype.endswith('.tsv'):
@@ -335,7 +323,6 @@ if __name__ == '__main__':
         
         if args.verbose: command.append('--verbose')
         
-        print(' '.join([str(i) for i in command]))
         run_command(command)
         
         if not args.keep_files: run_command(['rm -rf', temp])

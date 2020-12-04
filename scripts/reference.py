@@ -52,7 +52,8 @@ __date__        = '2019-04-02'
 #   Paths and filenames
 #-------------------------------------------------------------------------------
 
-rootDir = dirname(realpath(__file__)) + '/../'
+#rootDir = dirname(realpath(__file__)) + '/../'
+rootDir = ''
 
 IMGTHLA         = rootDir + 'dat/IMGTHLA/'
 IMGTHLA_git     = 'https://github.com/ANHIG/IMGTHLA.git'
@@ -61,6 +62,7 @@ hla_fa          = rootDir + 'dat/ref/hla.fasta'
 partial_fa      = rootDir + 'dat/ref/hla_partial.fasta'
 hla_p           = rootDir + 'dat/ref/hla.p'
 partial_p       = rootDir + 'dat/ref/hla_partial.p'
+custom_p        = rootDir + 'dat/ref/hla_custom.p'
 hla_idx         = rootDir + 'dat/ref/hla.idx'
 partial_idx     = rootDir + 'dat/ref/hla_partial.idx'
 parameters      = rootDir + 'dat/info/parameters.p'
@@ -225,7 +227,7 @@ def process_hla_dat():
 #-------------------------------------------------------------------------------
     
 def write_reference(sequences, info, fasta, idx, database, type):
-    '''Writes and idxes HLA references.'''
+    '''Writes and indexes HLA references.'''
     with open(fasta,'w') as file:
         SeqIO.write(sequences, file, 'fasta')
         
@@ -235,6 +237,13 @@ def write_reference(sequences, info, fasta, idx, database, type):
 
     run_command(['kallisto', 'index', '-i', idx, fasta] ,
                 '[reference] indexing ' + type + ' reference with Kallisto:')
+
+def write_custom_reference(info, database):
+    '''Writes information needed to build custom references.'''
+    commithash = hla_dat_version()
+    
+    with open(database,'wb') as file:
+        pickle.dump([commithash,info],file)
                 
 #-------------------------------------------------------------------------------
 #   Constructing reference
@@ -281,7 +290,21 @@ def build_fasta():
             for (start,stop) in utrs[allele].values():
                 seq = sequences[allele][start:stop]
                 other.add(seq)
-               
+                
+    def build_binding(allele):
+        gene = allele.split('*')[0]
+        if len(gene) == 1:
+            binding = {'2','3'}
+        else:
+            binding = {'2'}
+
+        allele_exons = sorted(exons[allele].items())
+        coords = [[start,stop] for n,(start,stop) in allele_exons if n in binding]
+        seq = [sequences[allele][start:stop] for start,stop in coords]
+        seq = ''.join(seq)
+
+        binding_cDNA[seq].add(allele)
+        
     # Constructs exon combination sequences for complete and 
     # partial alleles
     def build_combination(allele):
@@ -374,11 +397,13 @@ def build_fasta():
     
     gene_length = defaultdict(list)
     cDNA = defaultdict(set)
+    binding_cDNA = defaultdict(set)
     combo = {str(i):defaultdict(set) for i in exon_combinations}
     other = set()
 
     for allele in complete_alleles:
         build_complete(allele)
+        build_binding(allele)
         build_combination(allele)
         
     for allele in partial_alleles:
@@ -397,7 +422,28 @@ def build_fasta():
                     [gene_set, allele_idx, lengths, gene_length], 
                     hla_fa, hla_idx, hla_p, 
                     'complete')
-                    
+    
+    log.info('[reference] preparing custom reference functionality')
+    binding_groups = {process_allele(allele,2):a for a in binding_cDNA.values() for allele in a}
+    
+    group_idx = defaultdict(set)
+    binding_idx = defaultdict(set)
+    single_idx = dict()
+    
+    for idx, alleles in allele_idx.items():
+        idx = int(idx)
+        if not alleles: continue
+            
+        allele = process_allele(alleles[0], 2)
+
+        if allele not in single_idx:
+            single_idx[allele] = [idx]
+
+        group_idx[allele].add(idx)
+        
+        binding_group = binding_groups[allele]
+        binding_idx[allele].add(idx)
+    write_custom_reference([single_idx, group_idx, binding_idx], custom_p)
     
     log.info('[reference] building partial HLA database')
     seq_out, allele_idx, lengths, exon_idx = partial_records(combo, other)
@@ -408,6 +454,8 @@ def build_fasta():
                     partial_exons, partial_alleles], 
                     partial_fa, partial_idx, partial_p, 
                     'partial')
+    
+    
 
 #-------------------------------------------------------------------------------
 #   Main
